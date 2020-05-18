@@ -24,7 +24,7 @@ if __name__ == "__main__":
     df = get_rdataset("AirPassengers").data
     y = df.value
 
-    n_holdout = 12
+    n_holdout = 24
     seasonal_period = 12
 
     predictions = []
@@ -34,10 +34,20 @@ if __name__ == "__main__":
     model_keras_rnn.fit(y[:-n_holdout], epochs=100, lr=1e-2)
     predictions.append(("ES - keras RNN", model_keras_rnn.predict(n_holdout)))
 
+    # Exponential smoothing using keras RNN layers
+    model_keras_rnn_add = expon_smoothing_tf.ExponentialSmoothing(season="additive", seasonal_period=seasonal_period)
+    model_keras_rnn_add.fit(y[:-n_holdout], epochs=100, lr=1e-2)
+    predictions.append(("ES - keras RNN additive z", model_keras_rnn_add.predict(n_holdout)))
+
     # Exponential smoothing using statsmodels implementation
     model_stats = ES_statsmodels(y[:-n_holdout], trend="additive", damped=True, seasonal="multiplicative",
                                  seasonal_periods=seasonal_period).fit()
     predictions.append(("ES - statsmodels", model_stats.predict(start=0, end=y.size - 1)))
+
+    # Exponential smoothing using statsmodels implementation
+    model_stats_add = ES_statsmodels(y[:-n_holdout], trend="additive", damped=True, seasonal="additive",
+                                     seasonal_periods=seasonal_period).fit()
+    predictions.append(("ES - statsmodels additive", model_stats_add.predict(start=0, end=y.size - 1)))
 
     plt.figure()
     plt.plot(df.time[:-n_holdout], y[:-n_holdout], "--", label="train")

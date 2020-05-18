@@ -56,8 +56,8 @@ class ESRNN(Layer):
                                    constraint=AbsoluteMinMax(0.8, 1.0))
 
         # Seasonality smoothing
-        self.gamma = self.add_weight(shape=(input_shape[-1], 1), initializer=constant(0.05 * init_alpha), name='gamma',
-                                     constraint=AbsoluteMinMax(0.0, 1.0))
+        self.gamma = self.add_weight(shape=(input_shape[-1], 1), initializer=constant(0.5),
+                                     name='gamma', constraint=AbsoluteMinMax(0.0, 1.0))
 
         self.built = True
 
@@ -70,12 +70,21 @@ class ESRNN(Layer):
             if self.season == "multiplicative" and self.trend == "additive":
                 l = self.alpha * inputs / s0[:, :1] + (1 - self.alpha) * (l0 + self.phi * b0)
                 b = self.beta * (l - l0) + (1 - self.beta) * b0 * self.phi
-                c = self.gamma * inputs / l + (1 - self.gamma) * s0[:, :1]
+                s = self.gamma * inputs / (l + b * self.phi) + (1 - self.gamma) * s0[:, :1]
+
+                out = (l + b * self.phi) * s0[:, 1:2]
+
+            elif self.season == "additive" and self.trend == "additive":
+                l = self.alpha * (inputs - s0[:, :1]) + (1 - self.alpha) * (l0 + self.phi * b0)
+                b = self.beta * (l - l0) + (1 - self.beta) * b0 * self.phi
+                s = self.gamma * (inputs - l - self.phi * b) + (1 - self.gamma) * s0[:, :1]
+
+                out = l + b * self.phi + s0[:, 1:2]
 
             # Recreate seasonality states for next iteration so that first element matches next step
-            s = tf.keras.layers.concatenate([s0[:, 1:], c], axis=1)
+            s = tf.keras.layers.concatenate([s0[:, 1:], s], axis=1)
 
-            return (l + b * self.phi) * s[:, :1], [l, b, s]
+        return out, [l, b, s]
 
 
 class ExponentialSmoothing:
@@ -89,8 +98,8 @@ class ExponentialSmoothing:
         assert season in (None, "additive", "multiplicative"), "Invalid season (%s)!" % season
         assert season is None or seasonal_period is not None, "Invalid seasonal period (%s)!" % seasonal_period
 
-        assert trend == "additive" and season == "multiplicative", \
-            "Only additive trend and multiplicative season supported at the moment."
+        assert trend == "additive" and season in ("additive", "multiplicative"), \
+            "Only additive trend and seasonality supported at the moment."
 
         self.trend = trend
         self.season = season
@@ -114,8 +123,13 @@ class ExponentialSmoothing:
     def predict(self, n_oos_steps):
         preds, l, b, s = self.predictor.predict([self.y, np.array([0])])
         _, _, _, alpha, beta, phi, gamma = map(lambda x: x.ravel(), self.predictor.get_weights())
-        preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel() \
-                     * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
+
+        if self.season == "multiplicative":
+            preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel() \
+                         * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
+        elif self.season == "additive":
+            preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel() \
+                        + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
 
         return np.hstack([preds.ravel(), preds_oos.ravel()])
 
@@ -127,7 +141,11 @@ class ExponentialSmoothing:
         # Initial values from statsmodels implementation
         l0_start = self.y.ravel()[np.arange(self.y.size) % self.seasonal_period == 0].mean()
         b0_start = self.y.ravel()[1] - self.y.ravel()[0]
-        s0_start = self.y.ravel()[:self.seasonal_period] / l0_start
+
+        if self.season == "multiplicative":
+            s0_start = self.y.ravel()[:self.seasonal_period] / l0_start
+        elif self.season == "additive":
+            s0_start = self.y.ravel()[:self.seasonal_period] - l0_start
 
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
@@ -142,10 +160,16 @@ class ExponentialSmoothing:
         rnn = RNN(rnncell, return_sequences=True, return_state=True)
         out_rnn = rnn(inp_y, initial_state=[init_l0, init_b0, init_seas])
 
-        out = tf.keras.layers.concatenate([
-            tf.math.reduce_sum((init_l0 + init_b0) * init_seas[:, :1], axis=1)[:, None, None],
-            out_rnn[0]
-        ], axis=1)
+        if self.season == "multiplicative":
+            out = tf.keras.layers.concatenate([
+                tf.math.reduce_sum((init_l0 + init_b0) * init_seas[:, :1], axis=1)[:, None, None],
+                out_rnn[0]
+            ], axis=1)
+        elif self.season == "additive":
+            out = tf.keras.layers.concatenate([
+                tf.math.reduce_sum(init_l0 + init_b0 + init_seas[:, :1], axis=1)[:, None, None],
+                out_rnn[0]
+            ], axis=1)
 
         model = Model(inputs=[inp_y, inp_emb_id], outputs=out)
         model.compile(Adam(lr), "mse")
