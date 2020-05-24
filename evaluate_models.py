@@ -27,32 +27,32 @@ if __name__ == "__main__":
     n_holdout = 24
     seasonal_period = 12
 
-    predictions = []
+    params_to_plot = [
+        {"trend": trend, "seasonal": seasonal, "damped": trend is not None}
+        for trend in (None, "additive", "multiplicative",)
+        for seasonal in (None, "additive", "multiplicative")
+    ]
 
-    # Exponential smoothing using keras RNN layers
-    model_keras_rnn = expon_smoothing_tf.ExponentialSmoothing(seasonal_period=seasonal_period)
-    model_keras_rnn.fit(y[:-n_holdout], epochs=100, lr=1e-2)
-    predictions.append(("ES - keras RNN", model_keras_rnn.predict(n_holdout)))
+    model_predictions = []
+    for i_plot, params in enumerate(params_to_plot):
+        # Exponential smoothing using keras RNN layers
+        model_keras_rnn = expon_smoothing_tf.ExponentialSmoothing(**params, seasonal_period=seasonal_period)
+        model_keras_rnn.fit(y[:-n_holdout], epochs=100, lr=1e-2)
 
-    # Exponential smoothing using keras RNN layers
-    model_keras_rnn_add = expon_smoothing_tf.ExponentialSmoothing(season="additive", seasonal_period=seasonal_period)
-    model_keras_rnn_add.fit(y[:-n_holdout], epochs=100, lr=1e-2)
-    predictions.append(("ES - keras RNN additive z", model_keras_rnn_add.predict(n_holdout)))
+        # Exponential smoothing using statsmodels implementation
+        model_stats = ES_statsmodels(y[:-n_holdout], **params, seasonal_periods=seasonal_period).fit()
+        model_predictions.append(
+            (("ES - keras rnn %s" % str(params), model_keras_rnn.predict(n_holdout)),
+             ("ES - statsmodels %s" % str(params), model_stats.predict(start=0, end=y.size - 1)))
+        )
 
-    # Exponential smoothing using statsmodels implementation
-    model_stats = ES_statsmodels(y[:-n_holdout], trend="additive", damped=True, seasonal="multiplicative",
-                                 seasonal_periods=seasonal_period).fit()
-    predictions.append(("ES - statsmodels", model_stats.predict(start=0, end=y.size - 1)))
+    # Plot keras rnn vs statmodels
+    fig, axes = plt.subplots(len(params_to_plot) // 2 + (len(params_to_plot) % 2 == 1), 2)
+    for i_plot, parameter_predictions in enumerate(model_predictions):
+        ax = axes.ravel()[i_plot]
+        ax.plot(df.time[:-n_holdout], y[:-n_holdout], "--", label="train")
+        ax.plot(df.time[-n_holdout:], y[-n_holdout:], "--", label="test")
 
-    # Exponential smoothing using statsmodels implementation
-    model_stats_add = ES_statsmodels(y[:-n_holdout], trend="additive", damped=True, seasonal="additive",
-                                     seasonal_periods=seasonal_period).fit()
-    predictions.append(("ES - statsmodels additive", model_stats_add.predict(start=0, end=y.size - 1)))
-
-    plt.figure()
-    plt.plot(df.time[:-n_holdout], y[:-n_holdout], "--", label="train")
-    plt.plot(df.time[-n_holdout:], y[-n_holdout:], "--", label="test")
-    ax = plt.gca()
-    for model_name, model_predictions in predictions:
-        plot_and_calc_rmse(plt.gca(), df.time, df.value, model_predictions, n_holdout, model_name)
-    plt.legend()
+        for model_name, predictions in parameter_predictions:
+            plot_and_calc_rmse(ax, df.time, df.value, predictions, n_holdout, model_name)
+        ax.legend()
