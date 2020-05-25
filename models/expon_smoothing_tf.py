@@ -65,71 +65,63 @@ class ESRNN(Layer):
         inputs = inputs[0]
 
         l0 = states[0]
-        if self.trend:
-            b0 = states[1]
-        if self.seasonal:
-            s0 = states[1 + (self.trend is not None)]
+        b0 = states[1] if self.trend else None
+        s0 = states[1 + (self.trend is not None)] if self.seasonal else None
+        phi = getattr(self, "phi", None)
 
-        if self.seasonal:
-            if self.seasonal == "multiplicative":
-                if self.trend == "multiplicative":
-                    l = self.alpha * inputs / s0[:, :1] + (1 - self.alpha) * (l0 * self.phi * b0)
-                    b = self.beta * (l / l0) + (1 - self.beta) * b0 * self.phi
-                    s = self.gamma * inputs / (l * b * self.phi) + (1 - self.gamma) * s0[:, :1]
-                    out = (l * b * self.phi) * s0[:, 1:2]
-                    out_states = [l, b]
-                elif self.trend == "additive":
-                    l = self.alpha * inputs / s0[:, :1] + (1 - self.alpha) * (l0 + self.phi * b0)
-                    b = self.beta * (l - l0) + (1 - self.beta) * b0 * self.phi
-                    s = self.gamma * inputs / (l + b * self.phi) + (1 - self.gamma) * s0[:, :1]
-                    out = (l + b * self.phi) * s0[:, 1:2]
-                    out_states = [l, b]
-                else:
-                    l = self.alpha * inputs / s0[:, :1] + (1 - self.alpha) * l0
-                    s = self.gamma * inputs / l + (1 - self.gamma) * s0[:, :1]
-                    out = l * s0[:, 1:2]
-                    out_states = [l]
+        detrend_func = {
+            "multiplicative": lambda l, b: l / b,
+            "additive": lambda l, b: l - b,
+            None: lambda l, b: l
+        }[self.trend]
+        trend_func = {
+            "multiplicative": lambda l, b, phi: (l * b ** phi) if l is not None else b ** phi,
+            "additive": lambda l, b, phi: (l + b * phi) if l is not None else b * phi,
+            None: lambda l, b, phi: l
+        }[self.trend]
+        deseas_func = {
+            "multiplicative": lambda l_b, s: l_b / s,
+            "additive": lambda l_b, s: l_b - s,
+            None: lambda l_b, s: l_b
+        }[self.seasonal]
+        seas_func = {
+            "multiplicative": lambda l_b, s: l_b * s,
+            "additive": lambda l_b, s: l_b + s,
+            None: lambda l_b, s: l_b
+        }[self.seasonal]
 
-            elif self.seasonal == "additive":
-                if self.trend == "multiplicative":
-                    l = self.alpha * (inputs - s0[:, :1]) + (1 - self.alpha) * (l0 * self.phi * b0)
-                    b = self.beta * (l / l0) + (1 - self.beta) * b0 * self.phi
-                    s = self.gamma * (inputs - l * self.phi * b) + (1 - self.gamma) * s0[:, :1]
-                    out = l * b * self.phi + s0[:, 1:2]
-                    out_states = [l, b]
-                elif self.trend == "additive":
-                    l = self.alpha * (inputs - s0[:, :1]) + (1 - self.alpha) * (l0 + self.phi * b0)
-                    b = self.beta * (l - l0) + (1 - self.beta) * b0 * self.phi
-                    s = self.gamma * (inputs - l - self.phi * b) + (1 - self.gamma) * s0[:, :1]
-                    out = l + b * self.phi + s0[:, 1:2]
-                    out_states = [l, b]
-                else:
-                    l = self.alpha * (inputs - s0[:, :1]) + (1 - self.alpha) * l0
-                    s = self.gamma * (inputs - l) + (1 - self.gamma) * s0[:, :1]
-                    out = l + s0[:, 1:2]
-                    out_states = [l]
+        if self.seasonal and self.trend:
+            l = self.alpha * deseas_func(inputs, s0[:, :1]) + (1 - self.alpha) * trend_func(l0, b0, phi)
+            b = self.beta * detrend_func(l, l0) + (1 - self.beta) * trend_func(None, b0, phi)
+            s = self.gamma * deseas_func(inputs, trend_func(l, b, phi)) + (1 - self.gamma) * s0[:, :1]
 
             # Recreate seasonality states for next iteration so that first element matches next step
             s = tf.keras.layers.concatenate([s0[:, 1:], s], axis=1)
 
-            return out, out_states + [s]
+            out = seas_func(trend_func(l, b, phi), s0[:, 1:2])
+            out_states = [l, b, s]
+        elif self.seasonal:
+            l = self.alpha * deseas_func(inputs, s0[:, :1]) + (1 - self.alpha) * l0
+            s = self.gamma * deseas_func(inputs, l) + (1 - self.gamma) * s0[:, :1]
 
+            # Recreate seasonality states for next iteration so that first element matches next step
+            s = tf.keras.layers.concatenate([s0[:, 1:], s], axis=1)
+
+            out = seas_func(l, s0[:, 1:2])
+            out_states = [l, s]
         elif self.trend:
-            if self.trend == "multiplicative":
-                l = self.alpha * inputs + (1 - self.alpha) * (l0 * self.phi * b0)
-                b = self.beta * (l / l0) + (1 - self.beta) * b0 * self.phi
-                out = (l * b * self.phi)
+            l = self.alpha * inputs + (1 - self.alpha) * trend_func(l0, b0, phi)
+            b = self.beta * detrend_func(l, l0) + (1 - self.beta) * trend_func(None, b0, phi)
 
-            elif self.trend == "additive":
-                l = self.alpha * inputs + (1 - self.alpha) * (l0 + self.phi * b0)
-                b = self.beta * (l - l0) + (1 - self.beta) * b0 * self.phi
-                out = (l + b * self.phi)
-
-            return out, [l, b]
+            out = trend_func(l, b, phi)
+            out_states = [l, b]
         else:
             l = self.alpha * inputs + (1 - self.alpha) * l0
 
-            return l, [l]
+            out = l
+            out_states = [l]
+
+        return out, out_states
 
 
 class ExponentialSmoothing:
@@ -167,56 +159,31 @@ class ExponentialSmoothing:
 
     def predict(self, n_oos_steps):
         preds, *l_b_s = self.predictor.predict([self.y, np.array([0])])
+        phi = self.get_param("phi").ravel()[:, None] if self.trend else 1.0
 
-        if self.seasonal == "multiplicative":
-            if self.trend == "additive":
-                l, b, s = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel() \
-                             * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
-            elif self.trend == "multiplicative":
-                l, b, s = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l * b * phi ** np.arange(1, n_oos_steps)).ravel() \
-                            * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
-            else:
-                l, s = l_b_s
-
-                preds_oos = l.ravel() * \
-                            np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
-        elif self.seasonal == "additive":
-            if self.trend == "additive":
-                l, b, s = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel() \
-                            + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
-            elif self.trend == "multiplicative":
-                l, b, s = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l * b * phi ** np.arange(1, n_oos_steps)).ravel() \
-                            + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
-            else:
-                l, s = l_b_s
-
-                preds_oos = l \
-                            + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1]
+        if self.trend and self.seasonal:
+            l, b, s = l_b_s
+        elif self.seasonal:
+            l, s, b = *l_b_s, None
         elif self.trend:
-            if self.trend == "additive":
-                l, b = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l + np.arange(1, n_oos_steps) * b * phi ** np.arange(1, n_oos_steps)).ravel()
-            elif self.trend == "multiplicative":
-                l, b = l_b_s
-                phi = self.get_param("phi").ravel()[:, None]
-
-                preds_oos = (l * b * phi ** np.arange(1, n_oos_steps)).ravel()
+            l, b, s = *l_b_s, None
         else:
-            preds_oos = np.repeat(l_b_s[0].ravel(), n_oos_steps - 1)
+            l, b, s = *l_b_s, None, None
+
+        trend_func = {
+            "multiplicative": lambda l, b, phi: (l * b ** np.cumsum(phi ** np.arange(1, n_oos_steps))).ravel(),
+            "additive": lambda l, b, phi: (l + b * np.cumsum(phi ** np.arange(1, n_oos_steps))).ravel(),
+            None: lambda l, b, phi: l.ravel() * np.ones(n_oos_steps - 1)
+        }[self.trend]
+        seas_func = {
+            "multiplicative": lambda l_b, s:
+                l_b * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1],
+            "additive": lambda l_b, s:
+                l_b + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1],
+            None: lambda x, y: x
+        }[self.seasonal]
+
+        preds_oos = seas_func(trend_func(l, b, phi), s)
 
         return np.hstack([preds.ravel(), preds_oos.ravel()])
 

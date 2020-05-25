@@ -30,7 +30,7 @@ if __name__ == "__main__":
     params_to_plot = [
         {"trend": trend, "seasonal": seasonal, "damped": trend is not None}
         for trend in (None, "additive", "multiplicative",)
-        for seasonal in (None, "additive", "multiplicative")
+        for seasonal in (None, "additive", "multiplicative",)
     ]
 
     model_predictions = []
@@ -47,12 +47,15 @@ if __name__ == "__main__":
         )
 
     # Plot keras rnn vs statmodels
-    fig, axes = plt.subplots(len(params_to_plot) // 2 + (len(params_to_plot) % 2 == 1), 2)
+    fig, axes = plt.subplots(len(params_to_plot) // 2 + (len(params_to_plot) % 2 == 1), 2, sharex=True)
     for i_plot, parameter_predictions in enumerate(model_predictions):
         ax = axes.ravel()[i_plot]
         ax.plot(df.time[:-n_holdout], y[:-n_holdout], "--", label="train")
         ax.plot(df.time[-n_holdout:], y[-n_holdout:], "--", label="test")
 
         for model_name, predictions in parameter_predictions:
+            if np.isnan(predictions).sum() > 0:
+                # Invalid values in predictions
+                continue
             plot_and_calc_rmse(ax, df.time, df.value, predictions, n_holdout, model_name)
         ax.legend()
