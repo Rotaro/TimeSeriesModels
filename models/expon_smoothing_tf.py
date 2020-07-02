@@ -26,7 +26,7 @@ class AbsoluteMinMax(Constraint):
 
 
 class ESRNN(Layer):
-    def __init__(self, trend="additive", season="multiplicative", seasonal_period=12, **kwargs):
+    def __init__(self, trend=None, season=None, seasonal_period=None, **kwargs):
         assert trend in (None, "additive", "multiplicative"), "Invalid trend (%s)!" % trend
         assert season in (None, "additive", "multiplicative"), "Invalid season (%s)!" % season
         assert season is None or seasonal_period is not None, "Invalid seasonal period (%s)!" % seasonal_period
@@ -130,13 +130,10 @@ class ExponentialSmoothing:
      Using keras layers in anticipation of sharing information between time series.
      """
 
-    def __init__(self, trend="additive", damped=True, seasonal="multiplicative", seasonal_period=12):
+    def __init__(self, trend=None, damped=None, seasonal=None, seasonal_period=12):
         assert trend in (None, "additive", "multiplicative"), "Invalid trend (%s)!" % trend
         assert seasonal in (None, "additive", "multiplicative"), "Invalid season (%s)!" % seasonal
         assert seasonal is None or seasonal_period is not None, "Invalid seasonal period (%s)!" % seasonal_period
-
-        # assert trend == "additive" and season in ("additive", "multiplicative"), \
-        #     "Only additive trend and seasonality supported at the moment."
 
         self.trend = trend
         self.seasonal = seasonal
@@ -171,19 +168,20 @@ class ExponentialSmoothing:
             l, b, s = *l_b_s, None, None
 
         trend_func = {
-            "multiplicative": lambda l, b, phi: (l * b ** np.cumsum(phi ** np.arange(1, n_oos_steps))).ravel(),
-            "additive": lambda l, b, phi: (l + b * np.cumsum(phi ** np.arange(1, n_oos_steps))).ravel(),
-            None: lambda l, b, phi: l.ravel() * np.ones(n_oos_steps - 1)
+            "multiplicative": lambda l, b, phi: (l * b ** np.cumsum(phi ** np.arange(1, n_oos_steps + 1))).ravel(),
+            "additive": lambda l, b, phi: (l + b * np.cumsum(phi ** np.arange(1, n_oos_steps + 1))).ravel(),
+            None: lambda l, b, phi: l.ravel() * np.ones(n_oos_steps)
         }[self.trend]
         seas_func = {
             "multiplicative": lambda l_b, s:
-                l_b * np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1],
+                l_b * np.tile(s.ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps],
             "additive": lambda l_b, s:
-                l_b + np.tile(np.roll(s, -1).ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps - 1],
+                l_b + np.tile(s.ravel(), max(int(n_oos_steps // s.size), 1))[:n_oos_steps],
             None: lambda x, y: x
         }[self.seasonal]
 
-        preds_oos = seas_func(trend_func(l, b, phi), s)
+        # preds already includes first out of sample forecast
+        preds_oos = seas_func(trend_func(l, b, phi), s)[1:]
 
         return np.hstack([preds.ravel(), preds_oos.ravel()])
 
