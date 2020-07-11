@@ -11,7 +11,6 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing as ES_statsmodels
 
 
 def plot_and_calc_rmse(ax, x, y_true, y_pred, n_holdout, label=None):
-
     ax.plot(x, y_pred, label="%s - RMSE: %.2f" % (
         label, np.sqrt(mean_squared_error(y_true[-n_holdout:], y_pred[-n_holdout:]))
     ))

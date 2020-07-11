@@ -1,28 +1,13 @@
 import numpy as np
 
 import tensorflow as tf
-import tensorflow.keras.backend as K
 
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Layer, Embedding, RNN
-from tensorflow.keras.constraints import Constraint
 from tensorflow.keras.initializers import RandomUniform, constant
 from tensorflow.keras.optimizers import Adam
 
-
-class AbsoluteMinMax(Constraint):
-    def __init__(self, min_value=0.0, max_value=1.0, rate=1.0, axis=0):
-        self.min_value = min_value
-        self.max_value = max_value
-        self.rate = rate
-        self.axis = axis
-
-    def __call__(self, w):
-        norms = K.sqrt(K.sum(w, axis=self.axis, keepdims=True))
-        desired = (self.rate * K.clip(norms, self.min_value, self.max_value) +
-                   (1 - self.rate) * norms)
-        w = w * (desired / (K.epsilon() + norms))
-        return w
+from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
 
 
 class ESRNN(Layer):
@@ -124,11 +109,13 @@ class ESRNN(Layer):
         return out, out_states
 
 
-class ExponentialSmoothing:
+class ExponentialSmoothing(TFTimeSeriesModel):
     """Exponential smoothing using keras RNN layers.
 
      Using keras layers in anticipation of sharing information between time series.
      """
+
+    param_names = ["l0", "b0", "s0", "alpha", "beta", "phi", "gamma"]
 
     def __init__(self, trend=None, damped=None, seasonal=None, seasonal_period=12):
         assert trend in (None, "additive", "multiplicative"), "Invalid trend (%s)!" % trend
@@ -184,21 +171,6 @@ class ExponentialSmoothing:
         preds_oos = seas_func(trend_func(l, b, phi), s)[1:]
 
         return np.hstack([preds.ravel(), preds_oos.ravel()])
-
-    def get_param(self, name):
-        try:
-            param = self.predictor.get_layer(name).weights[0].numpy()
-        except ValueError as e:
-            # Parameter is in ESRNN layer
-            layer = [layer for layer in self.predictor.layers if isinstance(layer, RNN)][0]._layers[0]
-            param = getattr(layer, name, None)
-            param = param.numpy() if param else np.array([])
-
-        return param
-
-    def get_params(self):
-        param_names = ["l0", "b0", "s0", "alpha", "beta", "phi", "gamma"]
-        return dict(zip(param_names, map(lambda x: self.get_param(x).ravel(), param_names)))
 
     def _create_model_predictor(self, lr):
         y = self.y.ravel()
