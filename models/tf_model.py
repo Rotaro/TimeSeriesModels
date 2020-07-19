@@ -28,9 +28,9 @@ class TFTimeSeriesModel:
             # Parameter is in ESRNN layer
             layer = [layer for layer in self.predictor.layers if isinstance(layer, RNN)][0]._layers[0]
             param = getattr(layer, name, None)
-            param = param.numpy() if param else np.array([])
+            param = param.numpy() if param is not None else np.array([])
 
         return param
 
     def get_params(self):
-        return dict(zip(self.param_names, map(lambda x: self.get_param(x).ravel(), self.param_names)))
+        return dict(zip(self.param_names, map(lambda x: self.get_param(x), self.param_names)))

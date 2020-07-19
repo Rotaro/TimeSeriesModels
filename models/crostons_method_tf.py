@@ -12,18 +12,18 @@ from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
 
 
 class CrostonsRNN(Layer):
-    def __init__(self, sba=False, **kwargs):
+    def __init__(self,  n_time_series, sba=False, **kwargs):
         super(CrostonsRNN, self).__init__(**kwargs)
 
+        self.n_time_series = n_time_series
         self.sba = sba
         self.state_size = (1, 1, 1)  # Intensity, delay and actual delay
-        self.output_size = 1
 
     def build(self, input_shape):
         # Typical value from literature
         init_alpha = 0.1
         # Smoothing
-        self.alpha = self.add_weight(shape=(input_shape[-1], 1),
+        self.alpha = self.add_weight(shape=(self.n_time_series, 1),
                                      initializer=constant(init_alpha), name='alpha',
                                      constraint=AbsoluteMinMax(0.0, 1.0))
         self.built = True
@@ -31,15 +31,18 @@ class CrostonsRNN(Layer):
     def call(self, inputs, states):
         # See https://www.lancaster.ac.uk/pg/waller/pdfs/Intermittent_Demand_Forecasting.pdf for details.
         X = inputs[0]
+        X_id = inputs[1][:, 0]
 
         Z = states[0]
         V = states[1]
         q = states[2]
 
-        Z_next = self.alpha * X + (1 - self.alpha) * Z
-        V_next = self.alpha * q + (1 - self.alpha) * V
+        alpha = tf.gather(self.alpha, X_id)
 
-        zeros_bool = tf.math.equal(inputs, 0)
+        Z_next = alpha * X + (1 - alpha) * Z
+        V_next = alpha * q + (1 - alpha) * V
+
+        zeros_bool = tf.math.equal(X, 0)
         zeros = tf.cast(zeros_bool, tf.float32)
         non_zeros = tf.cast(~zeros_bool, tf.float32)
 
@@ -48,7 +51,7 @@ class CrostonsRNN(Layer):
         q = 1 * non_zeros + (q + 1) * zeros
 
         if self.sba:
-            out = (1 - self.alpha / 2) * Z_next / V_next
+            out = (1 - alpha / 2) * Z_next / V_next
         else:
             out = Z_next / V_next
 
@@ -66,7 +69,7 @@ class CrostonsMethod(TFTimeSeriesModel):
      :param loss: string, loss to use when training model, e.g. mse or poisson
      """
 
-    param_names = ["alpha", "l0"]
+    param_names = ["alpha", "Z0", "V0"]
 
     def __init__(self, sba=False, loss="mse"):
         self.y = None         # Need to save y for predicting out-of-sample
@@ -79,35 +82,44 @@ class CrostonsMethod(TFTimeSeriesModel):
         self.predictor = None
 
     def fit(self, y, lr=1e-2, epochs=100, verbose=2):
-        self.y = y.copy()[None, :, None]
+        if y.ndim == 1:
+            self.y = y.copy()[None, :, None]
+        elif y.ndim == 2:
+            self.y = y.copy()[:, :, None]
+        else:
+            raise Exception("Invalid y shape! (%s)" % str(y.shape))
 
         self.model, self.predictor = self._create_model_predictor(lr)
         self.model.fit([
-            self.y[:, :-1, :],   # Lagged sales as input
-            np.array([0])        # Dummy ID
+            self.y[:, :-1, :],          # Lagged sales as input
+            np.arange(self.y.shape[0])  # Dummy IDs
         ], self.y, epochs=epochs, verbose=verbose)
 
     def predict(self, n_oos_steps):
-        preds, *[Z, V, q] = self.predictor.predict([self.y, np.array([0])])
+        preds, *[Z, V, q] = self.predictor.predict([self.y, np.arange(self.y.shape[0])])
 
-        return np.hstack([preds.ravel(), np.repeat(preds.ravel()[-1], n_oos_steps - 1)])
+        return np.hstack([preds[:, :, 0], np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)])
 
     def _create_model_predictor(self, lr):
-        y = self.y.ravel()
-        l0_start = y[0]
+        y = self.y
+        Z0_start = y[:, 0]
+        V0_start = (np.argmax(np.cumsum(y > 0, axis=1) == 2, axis=1)
+                    - np.argmax(np.cumsum(y > 0, axis=1) == 1, axis=1)).reshape((y.shape[0], 1))
 
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
         # (Ab)using embeddings here for initial value variables
-        init_l0 = Embedding(1, 1, embeddings_initializer=constant(l0_start), name="l0")(inp_emb_id)[:, 0, :]
+        init_Z0 = Embedding(y.shape[0], 1, embeddings_initializer=constant(Z0_start), name="Z0")(inp_emb_id)[:, 0, :]
+        init_V0 = Embedding(y.shape[0], 1, embeddings_initializer=constant(V0_start), name="V0")(inp_emb_id)[:, 0, :]
 
-        rnncell = CrostonsRNN(self.sba)
+        rnncell = CrostonsRNN(y.shape[0], self.sba)
         rnn = RNN(rnncell, return_sequences=True, return_state=True)
-        out_rnn = rnn(inp_y, initial_state=[init_l0, tf.ones_like(inp_emb_id), tf.ones_like(inp_emb_id)])
+        out_rnn = rnn((inp_y, tf.cast(inp_emb_id[:, None, :] * tf.ones_like(inp_y), tf.int32)),
+                      initial_state=[init_Z0, init_V0, tf.ones_like(inp_emb_id)])
 
         out = tf.keras.layers.concatenate([
-            init_l0[:, :, None],
+            (init_Z0 / init_V0)[:, :, None],
             out_rnn[0]
         ], axis=1)
 
@@ -119,24 +131,30 @@ class CrostonsMethod(TFTimeSeriesModel):
 
         return model, predictor
 
+    def __repr__(self):
+        return "%s - sba: %s (%s)" % (
+            self.__class__.__name__, self.sba,
+             ",".join(["%s=%s" % (k, np.round(v.ravel() if v.size > 0 else 0, 2)) for k, v in self.get_params().items()])
+    )
+
 
 class TSBRNN(Layer):
-    def __init__(self, **kwargs):
+    def __init__(self, n_time_series, **kwargs):
         super(TSBRNN, self).__init__(**kwargs)
 
-        self.state_size = (1, 1)  # Intensity, delay and actual delay
-        self.output_size = 1
+        self.n_time_series = n_time_series
+        self.state_size = (1, 1)  # Intensity, delay
 
     def build(self, input_shape):
         # Typical value from literature
-        init_alpha, init_beta = 0.1, 0.1
+        init_alpha, init_beta = 0.05, 0.05
 
         # Smoothing for sales
-        self.alpha = self.add_weight(shape=(input_shape[-1], 1),
+        self.alpha = self.add_weight(shape=(self.n_time_series, 1),
                                      initializer=constant(init_alpha), name='alpha',
                                      constraint=AbsoluteMinMax(0.0, 1.0))
         # Smoothing for intervals
-        self.beta = self.add_weight(shape=(input_shape[-1], 1),
+        self.beta = self.add_weight(shape=(self.n_time_series, 1),
                                     initializer=constant(init_beta), name='beta',
                                     constraint=AbsoluteMinMax(0.0, 1.0))
         self.built = True
@@ -144,20 +162,24 @@ class TSBRNN(Layer):
     def call(self, inputs, states):
         # See https://www.lancaster.ac.uk/pg/waller/pdfs/Intermittent_Demand_Forecasting.pdf for details.
         X = inputs[0]
+        X_id = inputs[1][:, 0]
 
         Z = states[0]
         P = states[1]
 
-        zeros_bool = tf.math.equal(inputs, 0)
+        zeros_bool = tf.math.equal(X, 0)
         zeros = tf.cast(zeros_bool, tf.float32)
         non_zeros = tf.cast(~zeros_bool, tf.float32)
 
-        Z_next = self.alpha * X + (1 - self.alpha) * Z
+        alpha = tf.gather(self.alpha, X_id)
+        beta = tf.gather(self.beta, X_id)
+
+        Z_next = alpha * X + (1 - alpha) * Z
         Z_next = Z_next * non_zeros + Z * zeros
 
-        P_next = non_zeros * self.beta + (1 - self.beta) * P
+        P_next = non_zeros * beta + (1 - beta) * P
 
-        return P_next * Z_next, [P_next, Z_next]
+        return P_next * Z_next, [Z_next, P_next]
 
 
 class TSB(TFTimeSeriesModel):
@@ -168,7 +190,7 @@ class TSB(TFTimeSeriesModel):
     See https://www.lancaster.ac.uk/pg/waller/pdfs/Intermittent_Demand_Forecasting.pdf for model details.
     """
 
-    param_names = ["alpha", "beta", "l0"]
+    param_names = ["alpha", "beta", "Z0", "P0"]
 
     def __init__(self, loss="mse"):
         self.y = None         # Need to save y for predicting out-of-sample
@@ -180,34 +202,43 @@ class TSB(TFTimeSeriesModel):
         self.predictor = None
 
     def fit(self, y, lr=1e-2, epochs=100, verbose=2):
-        self.y = y.copy()[None, :, None]
+        if y.ndim == 1:
+            self.y = y.copy()[None, :, None]
+        elif y.ndim == 2:
+            self.y = y.copy()[:, :, None]
+        else:
+            raise Exception("Invalid y shape! (%s)" % str(y.shape))
 
         self.model, self.predictor = self._create_model_predictor(lr)
         self.model.fit([
-            self.y[:, :-1, :],   # Lagged sales as input
-            np.array([0])        # Dummy ID
+            self.y[:, :-1, :],          # Lagged sales as input
+            np.arange(self.y.shape[0])  # Dummy IDs
         ], self.y, epochs=epochs, verbose=verbose)
 
     def predict(self, n_oos_steps):
-        preds, *[Z, V] = self.predictor.predict([self.y, np.array([0])])
+        preds, *[Z, V] = self.predictor.predict([self.y, np.arange(self.y.shape[0])])
 
-        return np.hstack([preds.ravel(), np.repeat(preds.ravel()[-1], n_oos_steps - 1)])
+        return np.hstack([preds[:, :, 0], np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)])
 
     def _create_model_predictor(self, lr):
-        y = self.y.ravel()
-        l0_start = y[0]
+        y = self.y
+        Z0_start = y[:, 0]
+        P0_start = (np.argmax(np.cumsum(y > 0, axis=1) == 2, axis=1)
+                    - np.argmax(np.cumsum(y > 0, axis=1) == 1, axis=1)).reshape((y.shape[0], 1))
 
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
         # (Ab)using embeddings here for initial value variables
-        init_l0 = Embedding(1, 1, embeddings_initializer=constant(l0_start), name="l0")(inp_emb_id)[:, 0, :]
+        init_Z = Embedding(y.shape[0], 1, embeddings_initializer=constant(Z0_start), name="Z0")(inp_emb_id)[:, 0, :]
+        init_P = Embedding(y.shape[0], 1, embeddings_initializer=constant(P0_start), name="P0")(inp_emb_id)[:, 0, :]
 
-        rnn = RNN(TSBRNN(), return_sequences=True, return_state=True)
-        out_rnn = rnn(inp_y, initial_state=[init_l0, tf.ones_like(inp_emb_id)])
+        rnn = RNN(TSBRNN(y.shape[0], input_shape=(y.shape[0],)), return_sequences=True, return_state=True)
+        out_rnn = rnn((inp_y, tf.cast(inp_emb_id[:, None, :] * tf.ones_like(inp_y), tf.int32)),
+                      initial_state=[init_Z, init_P])
 
         out = tf.keras.layers.concatenate([
-            init_l0[:, :, None],
+            (init_Z * init_P)[:, :, None],
             out_rnn[0]
         ], axis=1)
 
@@ -218,3 +249,9 @@ class TSB(TFTimeSeriesModel):
         predictor = Model(inputs=[inp_y, inp_emb_id], outputs=[out, out_rnn[1:]])
 
         return model, predictor
+
+    def __repr__(self):
+        return "%s (%s)" % (
+            self.__class__.__name__,
+             ",".join(["%s=%s" % (k, np.round(v.ravel() if v.size > 0 else 0, 2)) for k, v in self.get_params().items()])
+    )

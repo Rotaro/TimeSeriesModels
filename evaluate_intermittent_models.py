@@ -22,22 +22,29 @@ if __name__ == "__main__":
 
     # Some intermittent demand
     y = np.array([
-        2, 1, 0, 4, 0, 0, 2, 1, 1, 0, 0, 2, 1, 2, 0, 1, 1, 0, 2, 0, 1, 3, 3, 0, 2, 0, 3, 1, 3, 0, 2, 2, 0, 2, 3, 3, 5,
-        0, 2, 1, 0, 3, 1, 0, 0, 0, 0, 1, 1, 1, 4, 0, 0, 1, 3, 0, 0, 1, 2, 0, 1, 0, 2, 2, 1, 2, 0, 1, 0, 3, 2, 2, 2, 1,
-        1, 2, 2, 3, 4, 3, 2, 1, 0, 3, 1, 1, 3, 0, 1, 0, 1, 2, 0, 1, 4, 3, 1, 2, 1, 3, 0, 0, 2
+        2, 1, 0, 4, 0, 0, 2, 1, 1, 0, 0, 2, 1, 2, 0, 1, 1, 0, 2, 0, 1, 3, 3, 0, 2, 0, 3, 1, 3, 0, 2, 2, 0, 2, 3, 3,
+        5, 0, 2, 1, 0, 3, 1, 0, 0, 0, 0, 1, 1, 1, 4, 0, 0, 1, 3, 0, 0, 1, 2, 0, 1, 0, 2, 2, 1, 2, 0, 1, 0, 3, 2, 2, 2,
+        1, 1, 2, 2, 3, 4, 3, 2, 1, 0, 3, 1, 1, 3, 0, 1, 0, 1, 2, 0, 1, 4, 3, 1, 2, 1, 3, 0, 0, 2
+    ])
+    y = np.vstack([
+        y[None, :],
+        y[None, :] * 2,
+        y[None, :] / 2
     ])
 
     n_holdout = 12
 
     models = [
-        (crostons_tf.CrostonsMethod(sba=True), {"epochs": 25, "lr": 1e-1}),
-        (crostons_tf.TSB(), {"epochs": 25, "lr": 1e-1})
+        (crostons_tf.CrostonsMethod(sba=False), {"epochs": 35, "lr": 1e-2}),
+        (crostons_tf.CrostonsMethod(sba=True), {"epochs": 35, "lr": 1e-2}),
+        (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2})
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts) in zip(axes.ravel(), models):
-        model.fit(y[:-n_holdout], **fit_opts)
+        model.fit(y[:, :-n_holdout], **fit_opts)
 
-        ax.plot(y, "o--", label="actual values")
-        plot_and_calc_rmse(ax, np.arange(y.size), y, model.predict(n_holdout), n_holdout,
-                           label="%s" % model.__class__.__name__)
+        for i in range(y.shape[0]):
+            ax.plot(y[i, :], "o--", label="actual values")
+            plot_and_calc_rmse(ax, np.arange(y.shape[1]), y[i, :], model.predict(n_holdout)[i, :], n_holdout,
+                               label="%s" % str(model))
         ax.legend()
