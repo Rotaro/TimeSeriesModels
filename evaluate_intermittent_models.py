@@ -13,31 +13,34 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing as ES_statsmodels
 
 def plot_and_calc_rmse(ax, x, y_true, y_pred, n_holdout, label=None):
     ax.plot(x, y_pred, label="%s - RMSE: %.2f" % (
-        label, np.sqrt(mean_squared_error(y_true[-n_holdout:], y_pred[-n_holdout:]))
-    ))
+        label, np.sqrt(mean_squared_error(y_true[-n_holdout:], y_pred[-n_holdout:])))
+    )
 
 
 if __name__ == "__main__":
     plt.style.use("ggplot")
 
-    # Some intermittent demand
-    y = np.array([
-        2, 1, 0, 4, 0, 0, 2, 1, 1, 0, 0, 2, 1, 2, 0, 1, 1, 0, 2, 0, 1, 3, 3, 0, 2, 0, 3, 1, 3, 0, 2, 2, 0, 2, 3, 3,
-        5, 0, 2, 1, 0, 3, 1, 0, 0, 0, 0, 1, 1, 1, 4, 0, 0, 1, 3, 0, 0, 1, 2, 0, 1, 0, 2, 2, 1, 2, 0, 1, 0, 3, 2, 2, 2,
-        1, 1, 2, 2, 3, 4, 3, 2, 1, 0, 3, 1, 1, 3, 0, 1, 0, 1, 2, 0, 1, 4, 3, 1, 2, 1, 3, 0, 0, 2
-    ])
-    y = np.vstack([
-        y[None, :],
-        y[None, :] * 2,
-        y[None, :] / 2
-    ])
+    n = 60
+
+    # Some seasonality
+    seasonality = np.array([0.8, 0.8, 0.9, 1.2, 1.5, 1.5])
+    seasonality /= seasonality.sum() / seasonality.size
+    # Just cyclical indices for now
+    x = np.tile(np.arange(1, seasonality.size + 1), int(n // seasonality.size) + 1)[:n]
+    x = np.tile(x, 3).reshape((3, n))
+
+    # Some intermittent demand (=poisson process) with seasonality
+    lam = np.array([0.1, 0.2, 0.8])
+    y = np.random.poisson(lam[:, None] * x, (3, n))
 
     n_holdout = 12
 
     models = [
         (crostons_tf.CrostonsMethod(sba=False), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.CrostonsMethod(sba=True), {"epochs": 35, "lr": 1e-2}),
-        (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2})
+        (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2}),
+        (crostons_tf.CrostonsMethod(sba=False, common_seasonality=True, loss="mse", seasonal_period=seasonality.size),
+         {"epochs": 100, "lr": 1e-2, "x": x[:, :-n_holdout]}),
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts) in zip(axes.ravel(), models):
@@ -47,4 +50,4 @@ if __name__ == "__main__":
             ax.plot(y[i, :], "o--", label="actual values")
             plot_and_calc_rmse(ax, np.arange(y.shape[1]), y[i, :], model.predict(n_holdout)[i, :], n_holdout,
                                label="%s" % str(model))
-        ax.legend()
+        ax.legend(fontsize=8)
