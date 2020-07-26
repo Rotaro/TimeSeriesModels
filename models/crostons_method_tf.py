@@ -9,6 +9,7 @@ from tensorflow.keras.optimizers import Adam
 
 
 from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
+import models.seasonality as seasonality
 
 
 class CrostonsRNN(Layer):
@@ -37,7 +38,7 @@ class CrostonsRNN(Layer):
         V = states[1]
         q = states[2]
 
-        alpha = tf.gather(self.alpha, X_id)
+        alpha = tf.clip_by_value(tf.gather(self.alpha, X_id), 0.0, 1.0)
 
         Z_next = alpha * X + (1 - alpha) * Z
         V_next = alpha * q + (1 - alpha) * V
@@ -67,12 +68,12 @@ class CrostonsMethod(TFTimeSeriesModel):
 
      :param sba: bool, whether to use SBA (Syntetos-Boylan Approximation) adjustment.
      :param loss: string, loss to use when training model, e.g. mse or poisson
-     :param common_seasonality: bool, whether to model simple multiplicative seasonality for all time series.
+     :param seasonality_type: string, type of multiplicative seasonality to use for all time series.
      """
 
     param_names = ["alpha", "Z0", "V0"]
 
-    def __init__(self, sba=False, loss="mse", common_seasonality=False, seasonal_period=None):
+    def __init__(self, sba=False, loss="mse", seasonality_type=None):
         self.y = None         # Need to save y for predicting out-of-sample
         self.x = None         # Need to save x for predicting out-of-sample
         self.rnnmodel = None
@@ -83,10 +84,11 @@ class CrostonsMethod(TFTimeSeriesModel):
         self.model = None
         self.predictor = None
 
-        self.common_seasonality = common_seasonality
-        self.seasonal_period = seasonal_period
+        self.seasonality_type = seasonality_type
+        self.seasonality = seasonality.Seasonality(seasonality_type) if seasonality_type else None
 
-        self.param_names = self.param_names + (["seas_emb"] if common_seasonality else [])
+        # TODO: Add seasonality parameters
+        self.param_names = self.param_names
 
     def fit(self, y, x=None, lr=1e-2, epochs=100, verbose=2):
         if y.ndim == 1:
@@ -96,9 +98,9 @@ class CrostonsMethod(TFTimeSeriesModel):
         else:
             raise Exception("Invalid y shape! (%s)" % str(y.shape))
 
-        if self.common_seasonality:
-            # TODO: Change x to be dates
+        if self.seasonality is not None:
             assert x is not None, "Need x input for seasonality!"
+            x = self.seasonality.datetime_to_array(x)
         self.x = x
 
         self.model, self.predictor = self._create_model_predictor(lr)
@@ -107,28 +109,17 @@ class CrostonsMethod(TFTimeSeriesModel):
                 self.y[:, :-1, :],          # Lagged sales as input
                 np.arange(self.y.shape[0])  # Dummy IDs
             ]
-            + ([self.x[:, :-1], self.x] if self.common_seasonality else []),
+            + (self.seasonality.get_fit_inputs(self.x) if self.seasonality else []),
             self.y, epochs=epochs, verbose=verbose)
 
     def predict(self, n_oos_steps):
-        if self.common_seasonality:
-            # Expand x by one for predicting one step ahead
-            x = np.hstack([self.x, self.x[:, -1:] + 1])
-            # x for rest of out-of-sample
-            x_oos = (self.x[:, -1:] + np.arange(2, n_oos_steps + 1))
-
-            for arr in (x, x_oos):
-                arr %= self.seasonal_period
-                arr[arr == 0] = self.seasonal_period
-
         preds, *[Z, V, q] = self.predictor.predict(
             [self.y, np.arange(self.y.shape[0])]
-            + ([self.x, x] if self.common_seasonality else [])
+            + (self.seasonality.get_predict_inputs(self.x) if self.seasonality else [])
         )
 
-        if self.common_seasonality:
-            deseason = self.model.get_layer("seas_emb").get_weights()[0][x[:, -1]]
-            oos = preds[:, -1:, 0] / deseason * self.model.get_layer("seas_emb").get_weights()[0][x_oos][:, :, 0]
+        if self.seasonality:
+            oos = self.seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[:, -1:], n_oos_steps)
         else:
             oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
 
@@ -143,18 +134,9 @@ class CrostonsMethod(TFTimeSeriesModel):
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
-        if self.common_seasonality:
-            inp_X_seas = [Input(shape=(None,), name="inp_X_seas")]
-            inp_Y_seas = [Input(shape=(None,), name="inp_Y_seas")]
-
-            seas_emb = Embedding(self.seasonal_period + 1, 1, name="seas_emb", embeddings_initializer=constant(1))
-
-            decoder = seas_emb(inp_X_seas[0])
-            encoder = seas_emb(inp_Y_seas[0])
-
-            inp_y_decoded = inp_y / decoder
+        if self.seasonality:
+            inp_y_decoded = self.seasonality.apply_decoder(inp_y)
         else:
-            inp_X_seas, inp_Y_seas = [], []
             inp_y_decoded = inp_y
 
         # (Ab)using embeddings here for initial value variables
@@ -176,14 +158,18 @@ class CrostonsMethod(TFTimeSeriesModel):
             out_rnn[0]
         ], axis=1)
 
-        if self.common_seasonality:
-            out = out * encoder
+        if self.seasonality:
+            out = self.seasonality.apply_encoder(out)
 
-        model = Model(inputs=[inp_y, inp_emb_id] + inp_X_seas + inp_Y_seas, outputs=out)
+        model = Model(inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+                      outputs=out)
         model.compile(Adam(lr), self.loss)
 
         # predictor also outputs final state for predicting out-of-sample
-        predictor = Model(inputs=[inp_y, inp_emb_id] + inp_X_seas + inp_Y_seas, outputs=[out, out_rnn[1:]])
+        predictor = Model(
+            inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+            outputs=[out, out_rnn[1:]]
+        )
 
         return model, predictor
 

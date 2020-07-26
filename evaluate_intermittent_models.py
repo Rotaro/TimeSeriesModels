@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,18 +22,23 @@ def plot_and_calc_rmse(ax, x, y_true, y_pred, n_holdout, label=None):
 if __name__ == "__main__":
     plt.style.use("ggplot")
 
-    n = 60
+    n_time = 120
+    n_timeseries = 4
 
-    # Some seasonality
-    seasonality = np.array([0.8, 0.8, 0.9, 1.2, 1.5, 1.5])
+    # Some weekly seasonality
+    seasonality = np.array([0.8, 0.8, 0.9, 0.9, 0.9, 2.5, 2.0])
     seasonality /= seasonality.sum() / seasonality.size
-    # Just cyclical indices for now
-    x = np.tile(np.arange(1, seasonality.size + 1), int(n // seasonality.size) + 1)[:n]
-    x = np.tile(x, 3).reshape((3, n))
+
+    x_weekdays = np.tile(np.arange(0, seasonality.size), int(n_time // seasonality.size) + 1)[:n_time]
+    x_weekdays = np.tile(x_weekdays, n_timeseries).reshape((n_timeseries, n_time))
+
+    x_dates = np.array([[dt.date(2019, 12, 30) + dt.timedelta(days=i) for i in range(n_time)]])
+    x_dates = np.tile(x_dates, n_timeseries).reshape((n_timeseries, n_time))
 
     # Some intermittent demand (=poisson process) with seasonality
-    lam = np.array([0.1, 0.2, 0.8])
-    y = np.random.poisson(lam[:, None] * x, (3, n))
+    x_seasonality = seasonality[x_weekdays]
+    lam = np.linspace(0.1, 1.5, n_timeseries)[:, None]
+    y = np.random.poisson(lam * x_seasonality, (n_timeseries, n_time))
 
     n_holdout = 12
 
@@ -39,8 +46,8 @@ if __name__ == "__main__":
         (crostons_tf.CrostonsMethod(sba=False), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.CrostonsMethod(sba=True), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2}),
-        (crostons_tf.CrostonsMethod(sba=False, common_seasonality=True, loss="mse", seasonal_period=seasonality.size),
-         {"epochs": 100, "lr": 1e-2, "x": x[:, :-n_holdout]}),
+        (crostons_tf.CrostonsMethod(sba=False, seasonality_type='weekday', loss="mse"),
+         {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts) in zip(axes.ravel(), models):
