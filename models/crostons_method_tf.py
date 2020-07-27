@@ -40,6 +40,9 @@ class IntermittentDemandModel(TFTimeSeriesModel):
     def _create_model_predictor(self, lr):
         raise NotImplementedError
 
+    def _get_dummy_ids(self):
+        return np.arange(self.y.shape[0], dtype=np.int32)
+
     def fit(self, y, x=None, lr=1e-2, epochs=100, verbose=2):
         self._handle_y(y)
         self._handle_x(x)
@@ -48,15 +51,15 @@ class IntermittentDemandModel(TFTimeSeriesModel):
         self.model.fit(
             [
                 self.y[:, :-1, :],          # Lagged sales as input
-                np.arange(self.y.shape[0])  # Dummy IDs
+                self._get_dummy_ids()       # Dummy IDs
             ]
-            + (self.seasonality.get_fit_inputs(self.x) if self.seasonality else []),
+            + (self.seasonality.get_fit_inputs(self._get_dummy_ids(), self.x) if self.seasonality else []),
             self.y, epochs=epochs, verbose=verbose)
 
     def predict(self, n_oos_steps):
         preds, *_ = self.predictor.predict(
             [self.y, np.arange(self.y.shape[0])]
-            + (self.seasonality.get_predict_inputs(self.x) if self.seasonality else [])
+            + (self.seasonality.get_predict_inputs(self._get_dummy_ids(), self.x) if self.seasonality else [])
         )
 
         if self.seasonality:
@@ -128,7 +131,7 @@ class CrostonsMethod(IntermittentDemandModel):
 
     param_names = ["alpha", "Z0", "V0"]
 
-    def __init__(self, sba=False, loss="mse", seasonality_type=None):
+    def __init__(self, sba=False, loss="mse", seasonality=None):
         self.y = None         # Need to save y for predicting out-of-sample
         self.x = None         # Need to save x for predicting out-of-sample
         self.rnnmodel = None
@@ -139,8 +142,7 @@ class CrostonsMethod(IntermittentDemandModel):
         self.model = None
         self.predictor = None
 
-        self.seasonality_type = seasonality_type
-        self.seasonality = seasonality.Seasonality(seasonality_type) if seasonality_type else None
+        self.seasonality = seasonality
 
         # TODO: Add seasonality parameters
         self.param_names = self.param_names
@@ -256,15 +258,14 @@ class TSB(IntermittentDemandModel):
 
     param_names = ["alpha", "beta", "Z0", "P0"]
 
-    def __init__(self, seasonality_type=None, loss="mse"):
+    def __init__(self, seasonality=None, loss="mse"):
         self.x = None         # Need to save x for predicting out-of-sample
         self.y = None         # Need to save y for predicting out-of-sample
         self.rnnmodel = None
 
         self.loss = loss
 
-        self.seasonality_type = seasonality_type
-        self.seasonality = seasonality.Seasonality(seasonality_type) if seasonality_type else None
+        self.seasonality = seasonality
 
         self.model = None
         self.predictor = None

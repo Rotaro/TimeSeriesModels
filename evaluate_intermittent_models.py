@@ -10,6 +10,7 @@ from statsmodels.datasets import get_rdataset
 
 import models.expon_smoothing_tf as expon_smoothing_tf
 import models.crostons_method_tf as crostons_tf
+from models.seasonality import SharedSeasonality, FactorizedSeasonality
 from statsmodels.tsa.holtwinters import ExponentialSmoothing as ES_statsmodels
 
 
@@ -46,15 +47,20 @@ if __name__ == "__main__":
         (crostons_tf.CrostonsMethod(sba=False), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.CrostonsMethod(sba=True), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2}),
-        (crostons_tf.CrostonsMethod(sba=False, seasonality_type='weekday', loss="mse"),
+        (crostons_tf.CrostonsMethod(sba=False, seasonality=SharedSeasonality("weekday"), loss="mse"),
          {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
-        (crostons_tf.TSB(seasonality_type='weekday', loss="mse"),
+        (crostons_tf.CrostonsMethod(sba=False,
+                                    seasonality=FactorizedSeasonality(y.shape[0], n_dim=1, seasonality_type="weekday"),
+                                    loss="mse"),
+         {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
+        (crostons_tf.TSB(seasonality=SharedSeasonality("weekday"), loss="mse"),
          {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts) in zip(axes.ravel(), models):
         model.fit(y[:, :-n_holdout], **fit_opts)
 
+        ax.vlines(np.arange(y.shape[1])[-n_holdout], y.min(), y.max(), linestyles="dashed")
         for i in range(y.shape[0]):
             ax.plot(y[i, :], "o--", label="actual values")
             plot_and_calc_rmse(ax, np.arange(y.shape[1]), y[i, :], model.predict(n_holdout)[i, :], n_holdout,
