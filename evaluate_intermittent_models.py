@@ -48,6 +48,8 @@ if __name__ == "__main__":
         (crostons_tf.TSB(), {"epochs": 35, "lr": 1e-2}),
         (crostons_tf.CrostonsMethod(sba=False, seasonality_type='weekday', loss="mse"),
          {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
+        (crostons_tf.TSB(seasonality_type='weekday', loss="mse"),
+         {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}),
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts) in zip(axes.ravel(), models):

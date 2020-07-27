@@ -12,6 +12,61 @@ from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
 import models.seasonality as seasonality
 
 
+class IntermittentDemandModel(TFTimeSeriesModel):
+    def __init__(self):
+        self.x = None
+        self.y = None
+        self.seasonality = None
+
+        self.model = None
+        self.predictor = None
+
+    def _handle_y(self, y):
+        if y.ndim == 1:
+            self.y = y.copy()[None, :, None]
+        elif y.ndim == 2:
+            self.y = y.copy()[:, :, None]
+        else:
+            raise Exception("Invalid y shape! (%s)" % str(y.shape))
+
+        return y
+
+    def _handle_x(self, x):
+        if self.seasonality is not None:
+            assert x is not None, "Need x input for seasonality!"
+            x = self.seasonality.datetime_to_array(x)
+        self.x = x
+
+    def _create_model_predictor(self, lr):
+        raise NotImplementedError
+
+    def fit(self, y, x=None, lr=1e-2, epochs=100, verbose=2):
+        self._handle_y(y)
+        self._handle_x(x)
+
+        self.model, self.predictor = self._create_model_predictor(lr)
+        self.model.fit(
+            [
+                self.y[:, :-1, :],          # Lagged sales as input
+                np.arange(self.y.shape[0])  # Dummy IDs
+            ]
+            + (self.seasonality.get_fit_inputs(self.x) if self.seasonality else []),
+            self.y, epochs=epochs, verbose=verbose)
+
+    def predict(self, n_oos_steps):
+        preds, *_ = self.predictor.predict(
+            [self.y, np.arange(self.y.shape[0])]
+            + (self.seasonality.get_predict_inputs(self.x) if self.seasonality else [])
+        )
+
+        if self.seasonality:
+            oos = self.seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[:, -1:], n_oos_steps)
+        else:
+            oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
+
+        return np.hstack([preds[:, :, 0], oos])
+
+
 class CrostonsRNN(Layer):
     def __init__(self,  n_time_series, sba=False, **kwargs):
         super(CrostonsRNN, self).__init__(**kwargs)
@@ -59,7 +114,7 @@ class CrostonsRNN(Layer):
         return out, [Z_next, V_next, q]
 
 
-class CrostonsMethod(TFTimeSeriesModel):
+class CrostonsMethod(IntermittentDemandModel):
     """Croston's method using keras RNN layers.
 
      Using keras layers in anticipation of sharing information between time series.
@@ -89,41 +144,6 @@ class CrostonsMethod(TFTimeSeriesModel):
 
         # TODO: Add seasonality parameters
         self.param_names = self.param_names
-
-    def fit(self, y, x=None, lr=1e-2, epochs=100, verbose=2):
-        if y.ndim == 1:
-            self.y = y.copy()[None, :, None]
-        elif y.ndim == 2:
-            self.y = y.copy()[:, :, None]
-        else:
-            raise Exception("Invalid y shape! (%s)" % str(y.shape))
-
-        if self.seasonality is not None:
-            assert x is not None, "Need x input for seasonality!"
-            x = self.seasonality.datetime_to_array(x)
-        self.x = x
-
-        self.model, self.predictor = self._create_model_predictor(lr)
-        self.model.fit(
-            [
-                self.y[:, :-1, :],          # Lagged sales as input
-                np.arange(self.y.shape[0])  # Dummy IDs
-            ]
-            + (self.seasonality.get_fit_inputs(self.x) if self.seasonality else []),
-            self.y, epochs=epochs, verbose=verbose)
-
-    def predict(self, n_oos_steps):
-        preds, *[Z, V, q] = self.predictor.predict(
-            [self.y, np.arange(self.y.shape[0])]
-            + (self.seasonality.get_predict_inputs(self.x) if self.seasonality else [])
-        )
-
-        if self.seasonality:
-            oos = self.seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[:, -1:], n_oos_steps)
-        else:
-            oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
-
-        return np.hstack([preds[:, :, 0], oos])
 
     def _create_model_predictor(self, lr):
         y = self.y
@@ -224,43 +244,30 @@ class TSBRNN(Layer):
         return P_next * Z_next, [Z_next, P_next]
 
 
-class TSB(TFTimeSeriesModel):
+class TSB(IntermittentDemandModel):
     """Teunter,Syntetos and Babai (TSB) method using keras RNN layers.
 
     Using keras layers in anticipation of sharing information between time series.
 
     See https://www.lancaster.ac.uk/pg/waller/pdfs/Intermittent_Demand_Forecasting.pdf for model details.
+
+    :param seasonality_type: string, type of multiplicative seasonality to use for all time series.
     """
 
     param_names = ["alpha", "beta", "Z0", "P0"]
 
-    def __init__(self, loss="mse"):
+    def __init__(self, seasonality_type=None, loss="mse"):
+        self.x = None         # Need to save x for predicting out-of-sample
         self.y = None         # Need to save y for predicting out-of-sample
         self.rnnmodel = None
 
         self.loss = loss
 
+        self.seasonality_type = seasonality_type
+        self.seasonality = seasonality.Seasonality(seasonality_type) if seasonality_type else None
+
         self.model = None
         self.predictor = None
-
-    def fit(self, y, lr=1e-2, epochs=100, verbose=2):
-        if y.ndim == 1:
-            self.y = y.copy()[None, :, None]
-        elif y.ndim == 2:
-            self.y = y.copy()[:, :, None]
-        else:
-            raise Exception("Invalid y shape! (%s)" % str(y.shape))
-
-        self.model, self.predictor = self._create_model_predictor(lr)
-        self.model.fit([
-            self.y[:, :-1, :],          # Lagged sales as input
-            np.arange(self.y.shape[0])  # Dummy IDs
-        ], self.y, epochs=epochs, verbose=verbose)
-
-    def predict(self, n_oos_steps):
-        preds, *[Z, V] = self.predictor.predict([self.y, np.arange(self.y.shape[0])])
-
-        return np.hstack([preds[:, :, 0], np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)])
 
     def _create_model_predictor(self, lr):
         y = self.y
@@ -271,12 +278,17 @@ class TSB(TFTimeSeriesModel):
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
+        if self.seasonality:
+            inp_y_decoded = self.seasonality.apply_decoder(inp_y)
+        else:
+            inp_y_decoded = inp_y
+
         # (Ab)using embeddings here for initial value variables
         init_Z = Embedding(y.shape[0], 1, embeddings_initializer=constant(Z0_start), name="Z0")(inp_emb_id)[:, 0, :]
         init_P = Embedding(y.shape[0], 1, embeddings_initializer=constant(P0_start), name="P0")(inp_emb_id)[:, 0, :]
 
         rnn = RNN(TSBRNN(y.shape[0], input_shape=(y.shape[0],)), return_sequences=True, return_state=True)
-        out_rnn = rnn((inp_y, tf.cast(inp_emb_id[:, None, :] * tf.ones_like(inp_y), tf.int32)),
+        out_rnn = rnn((inp_y_decoded, tf.cast(inp_emb_id[:, None, :] * tf.ones_like(inp_y), tf.int32)),
                       initial_state=[init_Z, init_P])
 
         out = tf.keras.layers.concatenate([
@@ -284,11 +296,18 @@ class TSB(TFTimeSeriesModel):
             out_rnn[0]
         ], axis=1)
 
-        model = Model(inputs=[inp_y, inp_emb_id], outputs=out)
+        if self.seasonality:
+            out = self.seasonality.apply_encoder(out)
+
+        model = Model(inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+                      outputs=out)
         model.compile(Adam(lr), self.loss)
 
         # predictor also outputs final state for predicting out-of-sample
-        predictor = Model(inputs=[inp_y, inp_emb_id], outputs=[out, out_rnn[1:]])
+        predictor = Model(
+            inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+            outputs=[out, out_rnn[1:]]
+        )
 
         return model, predictor
 
@@ -297,3 +316,4 @@ class TSB(TFTimeSeriesModel):
             self.__class__.__name__,
              ",".join(["%s=%s" % (k, np.round(v.ravel() if v.size > 0 else 0, 2)) for k, v in self.get_params().items()])
     )
+
