@@ -34,7 +34,7 @@ class IntermittentDemandModel(TFTimeSeriesModel):
     def _handle_x(self, x):
         if self.seasonality is not None:
             assert x is not None, "Need x input for seasonality!"
-            x = self.seasonality.datetime_to_array(x)
+            x = [seasonality.datetime_to_array(x) for seasonality in self.seasonality]
         self.x = x
 
     def _create_model_predictor(self, lr):
@@ -53,17 +53,27 @@ class IntermittentDemandModel(TFTimeSeriesModel):
                 self.y[:, :-1, :],          # Lagged sales as input
                 self._get_dummy_ids()       # Dummy IDs
             ]
-            + (self.seasonality.get_fit_inputs(self._get_dummy_ids(), self.x) if self.seasonality else []),
+            + ([
+                input
+                for i, seasonality in enumerate(self.seasonality)
+                for input in seasonality.get_fit_inputs(self._get_dummy_ids(), self.x[i])
+            ] if self.seasonality else []),
             self.y, epochs=epochs, verbose=verbose)
 
     def predict(self, n_oos_steps):
         preds, *_ = self.predictor.predict(
             [self.y, np.arange(self.y.shape[0])]
-            + (self.seasonality.get_predict_inputs(self._get_dummy_ids(), self.x) if self.seasonality else [])
+            + ([
+                input
+                for i, seasonality in enumerate(self.seasonality)
+                for input in seasonality.get_predict_inputs(self._get_dummy_ids(), self.x[i])
+            ] if self.seasonality else [])
         )
 
         if self.seasonality:
-            oos = self.seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[:, -1:], n_oos_steps)
+            oos = np.ones((self.y.shape[0], n_oos_steps - 1))
+            for i, seasonality in enumerate(self.seasonality):
+                oos *= seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[i][:, -1:], n_oos_steps)
         else:
             oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
 
@@ -142,6 +152,8 @@ class CrostonsMethod(IntermittentDemandModel):
         self.model = None
         self.predictor = None
 
+        if seasonality is not None and not isinstance(seasonality, list):
+            seasonality = [seasonality]
         self.seasonality = seasonality
 
         # TODO: Add seasonality parameters
@@ -156,10 +168,10 @@ class CrostonsMethod(IntermittentDemandModel):
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
+        inp_y_decoded = inp_y
         if self.seasonality:
-            inp_y_decoded = self.seasonality.apply_decoder(inp_y)
-        else:
-            inp_y_decoded = inp_y
+            for seasonality in self.seasonality:
+                inp_y_decoded = seasonality.apply_decoder(inp_y_decoded)
 
         # (Ab)using embeddings here for initial value variables
         init_Z0 = Embedding(y.shape[0], 1, embeddings_initializer=constant(Z0_start), name="Z0")(inp_emb_id)[:, 0, :]
@@ -181,16 +193,22 @@ class CrostonsMethod(IntermittentDemandModel):
         ], axis=1)
 
         if self.seasonality:
-            out = self.seasonality.apply_encoder(out)
+            for seasonality in self.seasonality:
+                out = seasonality.apply_encoder(out)
 
-        model = Model(inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+        model = Model(inputs=[inp_y, inp_emb_id]
+                             + ([input
+                                for seasonality in self.seasonality
+                                for input in seasonality.get_model_inputs()] if self.seasonality else []),
                       outputs=out)
         model.compile(Adam(lr), self.loss)
 
         # predictor also outputs final state for predicting out-of-sample
-        predictor = Model(
-            inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
-            outputs=[out, out_rnn[1:]]
+        predictor = Model(inputs=[inp_y, inp_emb_id]
+                                 + ([input
+                                     for seasonality in self.seasonality
+                                     for input in seasonality.get_model_inputs()] if self.seasonality else []),
+                          outputs=[out, out_rnn[1:]]
         )
 
         return model, predictor
@@ -265,6 +283,8 @@ class TSB(IntermittentDemandModel):
 
         self.loss = loss
 
+        if seasonality is not None and not isinstance(seasonality, list):
+            seasonality = [seasonality]
         self.seasonality = seasonality
 
         self.model = None
@@ -279,10 +299,10 @@ class TSB(IntermittentDemandModel):
         inp_y = Input(shape=(None, 1))
         inp_emb_id = Input(shape=(1,))  # Dummy ID for embeddings
 
+        inp_y_decoded = inp_y
         if self.seasonality:
-            inp_y_decoded = self.seasonality.apply_decoder(inp_y)
-        else:
-            inp_y_decoded = inp_y
+            for seasonality in self.seasonality:
+                inp_y_decoded = seasonality.apply_decoder(inp_y_decoded)
 
         # (Ab)using embeddings here for initial value variables
         init_Z = Embedding(y.shape[0], 1, embeddings_initializer=constant(Z0_start), name="Z0")(inp_emb_id)[:, 0, :]
@@ -298,15 +318,22 @@ class TSB(IntermittentDemandModel):
         ], axis=1)
 
         if self.seasonality:
-            out = self.seasonality.apply_encoder(out)
+            for seasonality in self.seasonality:
+                out = seasonality.apply_encoder(out)
 
-        model = Model(inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+        model = Model(inputs=[inp_y, inp_emb_id]
+                             + ([input
+                                 for seasonality in self.seasonality
+                                 for input in seasonality.get_model_inputs()] if self.seasonality else []),
                       outputs=out)
         model.compile(Adam(lr), self.loss)
 
         # predictor also outputs final state for predicting out-of-sample
         predictor = Model(
-            inputs=[inp_y, inp_emb_id] + (self.seasonality.get_model_inputs() if self.seasonality else []),
+            inputs=[inp_y, inp_emb_id]
+                   + ([input
+                       for seasonality in self.seasonality
+                       for input in seasonality.get_model_inputs()] if self.seasonality else []),
             outputs=[out, out_rnn[1:]]
         )
 

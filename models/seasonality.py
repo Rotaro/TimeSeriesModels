@@ -2,36 +2,34 @@ import numpy as np
 
 import tensorflow as tf
 
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Layer, Embedding, RNN, Dense, Flatten
+from tensorflow.keras.layers import Input, Embedding, Dense
 from tensorflow.keras.initializers import constant
 from tensorflow.keras.regularizers import l1_l2
-from tensorflow.keras.optimizers import Adam
 
 
-from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
+type_to_period = {
+    "weekday": 7,
+    "weekofyear": 53,
+    "month": 12,
+    "weekofmonth": 5,
+}
+type_datetime_to_int_func = {
+    "weekday": lambda dt: dt.weekday(),
+    "weekofyear": lambda dt: dt.isocalendar()[1] - 1,
+    "month": lambda dt: dt.month - 1,
+    "weekofmonth": lambda dt: dt.day // 7,
+}
 
 
 class SharedSeasonality:
     """Shared seasonality for time series."""
-    type_to_period = {
-        "weekday": 7,
-        "weekofyear": 53,
-        "month": 12,
-    }
-    type_datetime_to_int_func = {
-        "weekday": lambda dt: dt.weekday(),
-        "weekofyear": lambda dt: dt.isocalendar()[1],
-        "month": lambda dt: dt.month,
-    }
-
     def __init__(self, seasonality_type="week"):
-        assert seasonality_type in self.type_to_period, \
-            "Invalid seasonality! Needs to be in %s!" % self.type_to_period.keys()
+        assert seasonality_type in type_to_period, \
+            "Invalid seasonality! Needs to be in %s!" % type_to_period.keys()
 
         self.seasonality_type = seasonality_type
-        self.seasonal_period = self.type_to_period[self.seasonality_type]
-        self._datetime_to_int_func = self.type_datetime_to_int_func[self.seasonality_type]
+        self.seasonal_period = type_to_period[self.seasonality_type]
+        self._datetime_to_int_func = type_datetime_to_int_func[self.seasonality_type]
 
         self._embedding = None
         self._inputs = None
@@ -49,13 +47,14 @@ class SharedSeasonality:
     def _create_embedding(self):
         self._embedding = Embedding(
                 self.seasonal_period, output_dim=1,
-                name="seas_emb", embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=1e-3)
+                name="seas_emb_%s" % self.seasonality_type, embeddings_initializer=constant(0),
+                embeddings_regularizer=l1_l2(l2=1e-3)
         )
 
     def _create_inputs(self):
         self._inputs = [
-            Input(shape=(None,), name="inp_X_seas"),
-            Input(shape=(None,), name="inp_Y_seas")
+            Input(shape=(None,), name="inp_X_seas_%s" % self.seasonality_type),
+            Input(shape=(None,), name="inp_Y_seas_%s" % self.seasonality_type)
         ]
 
     def _create_decoder(self):
@@ -93,29 +92,24 @@ class SharedSeasonality:
     def get_weights(self):
         return self._embedding.get_weights()[0] + 1
 
+    def plot_seasonality(self):
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.plot(self.get_weights())
+        plt.title(self.seasonality_type, fontsize=15)
+
 
 class FactorizedSeasonality:
-    type_to_period = {
-        "weekday": 7,
-        "weekofyear": 53,
-        "month": 12,
-    }
-    type_datetime_to_int_func = {
-        "weekday": lambda dt: dt.weekday(),
-        "weekofyear": lambda dt: dt.isocalendar()[1],
-        "month": lambda dt: dt.month,
-    }
-
     def __init__(self, n_time_series, n_dim=1, seasonality_type="weekday"):
-        assert seasonality_type in self.type_to_period, \
-            "Invalid seasonality! Needs to be in %s!" % self.type_to_period.keys()
+        assert seasonality_type in type_to_period, \
+            "Invalid seasonality! Needs to be in %s!" % type_to_period.keys()
 
         self.n_time_series = n_time_series
         self.n_dim = n_dim
 
         self.seasonality_type = seasonality_type
-        self.seasonal_period = self.type_to_period[self.seasonality_type]
-        self._datetime_to_int_func = self.type_datetime_to_int_func[self.seasonality_type]
+        self.seasonal_period = type_to_period[self.seasonality_type]
+        self._datetime_to_int_func = type_datetime_to_int_func[self.seasonality_type]
 
         self._embedding = None
         self._inputs = None
@@ -134,16 +128,17 @@ class FactorizedSeasonality:
         # First embedding for time series ID
         self._embedding = Embedding(
                 self.n_time_series, output_dim=self.n_dim,
-                name="seas_emb", embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=1e-3)
+                name="seas_emb_%s" % self.seasonality_type,
+                embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=1e-3)
         )
 
         self._seasonality_weights = Dense(self.seasonal_period, activation='linear')
 
     def _create_inputs(self):
         self._inputs = [
-            Input(shape=(1,), name="timeseries_id"),
-            Input(shape=(None,), name="inp_X_seas", dtype=tf.int32),
-            Input(shape=(None,), name="inp_Y_seas", dtype=tf.int32)
+            Input(shape=(1,), name="timeseries_id_%s" % self.seasonality_type),
+            Input(shape=(None,), name="inp_X_seas_%s" % self.seasonality_type, dtype=tf.int32),
+            Input(shape=(None,), name="inp_Y_seas_%s" % self.seasonality_type, dtype=tf.int32)
         ]
 
     def _create_decoder(self):
@@ -190,4 +185,11 @@ class FactorizedSeasonality:
         return first_oos_prediction / deseason * oos_season
 
     def get_weights(self):
-        return self._embedding.get_weights()[0] + 1
+        return self._embedding.get_weights()[0] @self._seasonality_weights.get_weights()[0] + \
+               self._seasonality_weights.get_weights()[1] + 1
+
+    def plot_seasonality(self):
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.plot(self.get_weights().T)
+        plt.title(self.seasonality_type, fontsize=15)
