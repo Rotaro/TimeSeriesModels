@@ -1,3 +1,5 @@
+import datetime as dt
+
 import numpy as np
 
 import tensorflow as tf
@@ -7,29 +9,57 @@ from tensorflow.keras.initializers import constant
 from tensorflow.keras.regularizers import l1_l2
 
 
-type_to_period = {
-    "weekday": 7,
-    "weekofyear": 53,
-    "month": 12,
-    "weekofmonth": 5,
-}
-type_datetime_to_int_func = {
-    "weekday": lambda dt: dt.weekday(),
-    "weekofyear": lambda dt: dt.isocalendar()[1] - 1,
-    "month": lambda dt: dt.month - 1,
-    "weekofmonth": lambda dt: dt.day // 7,
-}
+class Seasonality:
+    type_to_period = {
+        "weekday": 7,
+        "weekofyear": 53,
+        "month": 12,
+        "weekofmonth": 5,
+    }
+    type_datetime_to_int_func = {
+        "weekday": lambda dt: dt.weekday(),
+        "weekofyear": lambda dt: dt.isocalendar()[1] - 1,
+        "month": lambda dt: dt.month - 1,
+        "weekofmonth": lambda dt: dt.day // 7,
+    }
 
-
-class SharedSeasonality:
-    """Shared seasonality for time series."""
-    def __init__(self, seasonality_type="week"):
-        assert seasonality_type in type_to_period, \
-            "Invalid seasonality! Needs to be in %s!" % type_to_period.keys()
+    def __init__(self, seasonality_type):
+        assert seasonality_type in self.type_to_period, \
+            "Invalid seasonality! Needs to be in %s!" % self.type_to_period.keys()
 
         self.seasonality_type = seasonality_type
-        self.seasonal_period = type_to_period[self.seasonality_type]
-        self._datetime_to_int_func = type_datetime_to_int_func[self.seasonality_type]
+        self.seasonal_period = self.type_to_period[self.seasonality_type]
+        self._datetime_to_int_func = self.type_datetime_to_int_func[self.seasonality_type]
+
+    def datetime_to_array(self, arr):
+        return np.vectorize(self._datetime_to_int_func)(arr)
+
+    def _get_next_x(self, last_date, n_next):
+        new_dates = last_date + np.vectorize(lambda t: dt.timedelta(days=int(t)))(np.arange(1, n_next + 1))
+        return self.datetime_to_array(new_dates)
+
+    def apply_decoder(self, apply_to):
+        return apply_to / self._decoder
+
+    def apply_encoder(self, apply_to):
+        return apply_to * self._encoder
+
+    def get_model_inputs(self):
+        return self._inputs
+
+    def plot_seasonality(self):
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.plot(self.get_weights().T)
+        plt.title(self.seasonality_type, fontsize=15)
+
+
+class SharedSeasonality(Seasonality):
+    """Shared seasonality for time series."""
+    def __init__(self, seasonality_type="week", l2_reg=1e-3):
+        super().__init__(seasonality_type)
+
+        self.l2_reg = l2_reg
 
         self._embedding = None
         self._inputs = None
@@ -41,14 +71,11 @@ class SharedSeasonality:
         self._create_decoder()
         self._create_encoder()
 
-    def datetime_to_array(self, arr):
-        return np.vectorize(self._datetime_to_int_func)(arr)
-
     def _create_embedding(self):
         self._embedding = Embedding(
                 self.seasonal_period, output_dim=1,
                 name="seas_emb_%s" % self.seasonality_type, embeddings_initializer=constant(0),
-                embeddings_regularizer=l1_l2(l2=1e-3)
+                embeddings_regularizer=l1_l2(l2=self.l2_reg)
         )
 
     def _create_inputs(self):
@@ -63,53 +90,34 @@ class SharedSeasonality:
     def _create_encoder(self):
         self._encoder = self._embedding(self._inputs[1]) + 1
 
-    def get_model_inputs(self):
-        return self._inputs
-
     def get_fit_inputs(self, ids, x):
         return [x[:, :-1], x]
 
-    def apply_decoder(self, apply_to):
-        return apply_to / self._decoder
-
-    def apply_encoder(self, apply_to):
-        return apply_to * self._encoder
-
-    def get_predict_inputs(self, ids, x):
+    def get_predict_inputs(self, ids, x, last_date):
         # Expand x by one for predicting one step ahead
-        x_expanded = (np.hstack([x, x[:, -1:] + 1]) % self.seasonal_period).astype(x.dtype)
+        x_expanded = np.hstack([x, self._get_next_x(last_date, 1)])
 
         return [x, x_expanded]
 
-    def get_oos_predictions(self, first_oos_prediction, last_seasonality, n_oos_steps):
-        x_oos = (last_seasonality[:, -1:] + np.arange(1, n_oos_steps + 1)) % self.seasonal_period
+    def get_oos_predictions(self, first_oos_prediction, last_date, n_oos_steps):
+        x_oos = self._get_next_x(last_date, n_oos_steps)
 
         deseason = self._embedding.get_weights()[0][x_oos[:, 0]] + 1
         oos_season = self._embedding.get_weights()[0][x_oos[:, 1:]][:, :, 0] + 1
 
-        return first_oos_prediction / deseason * oos_season
+        return first_oos_prediction * oos_season / deseason
 
     def get_weights(self):
         return self._embedding.get_weights()[0] + 1
 
-    def plot_seasonality(self):
-        import matplotlib.pyplot as plt
-        plt.figure()
-        plt.plot(self.get_weights())
-        plt.title(self.seasonality_type, fontsize=15)
 
-
-class FactorizedSeasonality:
-    def __init__(self, n_time_series, n_dim=1, seasonality_type="weekday"):
-        assert seasonality_type in type_to_period, \
-            "Invalid seasonality! Needs to be in %s!" % type_to_period.keys()
+class FactorizedSeasonality(Seasonality):
+    def __init__(self, n_time_series, n_dim=1, seasonality_type="weekday", l2_reg=1e-3):
+        super().__init__(seasonality_type)
 
         self.n_time_series = n_time_series
         self.n_dim = n_dim
-
-        self.seasonality_type = seasonality_type
-        self.seasonal_period = type_to_period[self.seasonality_type]
-        self._datetime_to_int_func = type_datetime_to_int_func[self.seasonality_type]
+        self.l2_reg = l2_reg
 
         self._embedding = None
         self._inputs = None
@@ -121,15 +129,12 @@ class FactorizedSeasonality:
         self._create_decoder()
         self._create_encoder()
 
-    def datetime_to_array(self, arr):
-        return np.vectorize(self._datetime_to_int_func)(arr)
-
     def _create_embedding(self):
         # First embedding for time series ID
         self._embedding = Embedding(
                 self.n_time_series, output_dim=self.n_dim,
                 name="seas_emb_%s" % self.seasonality_type,
-                embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=1e-3)
+                embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=self.l2_reg)
         )
 
         self._seasonality_weights = Dense(self.seasonal_period, activation='linear')
@@ -155,41 +160,25 @@ class FactorizedSeasonality:
 
         self._encoder = seas_values[:, :, None] + 1
 
-    def get_model_inputs(self):
-        return self._inputs
-
     def get_fit_inputs(self, ids, x):
         return [ids, x[:, :-1], x]
 
-    def apply_decoder(self, apply_to):
-        return apply_to / self._decoder
-
-    def apply_encoder(self, apply_to):
-        return apply_to * self._encoder
-
-    def get_predict_inputs(self, ids, x):
+    def get_predict_inputs(self, ids, x, last_date):
         # Expand x by one for predicting one step ahead
-        x_expanded = (np.hstack([x, x[:, -1:] + 1]) % self.seasonal_period).astype(x.dtype)
+        x_expanded = np.hstack([x, self._get_next_x(last_date, 1)])
 
         return [ids, x, x_expanded]
 
-    def get_oos_predictions(self, first_oos_prediction, last_seasonality, n_oos_steps):
-        x_oos = (last_seasonality[:, -1:] + np.arange(1, n_oos_steps + 1)) % self.seasonal_period
+    def get_oos_predictions(self, first_oos_prediction, last_date, n_oos_steps):
+        x_oos = self._get_next_x(last_date, n_oos_steps)
 
-        id_emb = self._embedding.get_weights()[0][np.arange(self.n_time_series)]
-        id_seas_values = id_emb@self._seasonality_weights.get_weights()[0] + self._seasonality_weights.get_weights()[1]
+        id_seas_values = self.get_weights()
 
-        deseason = np.take_along_axis(id_seas_values, x_oos[:, :1], axis=1) + 1
-        oos_season = np.take_along_axis(id_seas_values, x_oos[:, 1:], axis=1) + 1
+        deseason = np.take_along_axis(id_seas_values, x_oos[:, :1], axis=1)
+        oos_season = np.take_along_axis(id_seas_values, x_oos[:, 1:], axis=1)
 
-        return first_oos_prediction / deseason * oos_season
+        return first_oos_prediction * oos_season / deseason
 
     def get_weights(self):
-        return self._embedding.get_weights()[0] @self._seasonality_weights.get_weights()[0] + \
+        return self._embedding.get_weights()[0] @ self._seasonality_weights.get_weights()[0] + \
                self._seasonality_weights.get_weights()[1] + 1
-
-    def plot_seasonality(self):
-        import matplotlib.pyplot as plt
-        plt.figure()
-        plt.plot(self.get_weights().T)
-        plt.title(self.seasonality_type, fontsize=15)

@@ -9,11 +9,11 @@ from tensorflow.keras.optimizers import Adam
 
 
 from models.tf_model import AbsoluteMinMax, TFTimeSeriesModel
-import models.seasonality as seasonality
 
 
 class IntermittentDemandModel(TFTimeSeriesModel):
     def __init__(self):
+        self.x_dates = None
         self.x = None
         self.y = None
         self.seasonality = None
@@ -47,6 +47,8 @@ class IntermittentDemandModel(TFTimeSeriesModel):
         self._handle_y(y)
         self._handle_x(x)
 
+        self.x_dates = x
+
         self.model, self.predictor = self._create_model_predictor(lr)
         self.model.fit(
             [
@@ -66,14 +68,14 @@ class IntermittentDemandModel(TFTimeSeriesModel):
             + ([
                 input
                 for i, seasonality in enumerate(self.seasonality)
-                for input in seasonality.get_predict_inputs(self._get_dummy_ids(), self.x[i])
+                for input in seasonality.get_predict_inputs(self._get_dummy_ids(), self.x[i], self.x_dates[:, -1:])
             ] if self.seasonality else [])
         )
 
         if self.seasonality:
-            oos = np.ones((self.y.shape[0], n_oos_steps - 1))
+            oos = np.ones((self.y.shape[0], n_oos_steps - 1)) * preds[:, -1:, 0]
             for i, seasonality in enumerate(self.seasonality):
-                oos *= seasonality.get_oos_predictions(preds[:, -1:, 0], self.x[i][:, -1:], n_oos_steps)
+                oos *= seasonality.get_oos_predictions(np.ones_like(preds[:, -1:, 0]), self.x_dates[:, -1:], n_oos_steps)
         else:
             oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
 
@@ -344,4 +346,3 @@ class TSB(IntermittentDemandModel):
             self.__class__.__name__,
              ",".join(["%s=%s" % (k, np.round(v.ravel() if v.size > 0 else 0, 2)) for k, v in self.get_params().items()])
     )
-
