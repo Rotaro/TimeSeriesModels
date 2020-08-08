@@ -15,12 +15,14 @@ class Seasonality:
         "weekofyear": 53,
         "month": 12,
         "weekofmonth": 5,
+        "hour": 24,
     }
     type_datetime_to_int_func = {
         "weekday": lambda dt: dt.weekday(),
         "weekofyear": lambda dt: dt.isocalendar()[1] - 1,
         "month": lambda dt: dt.month - 1,
         "weekofmonth": lambda dt: dt.day // 7,
+        "hour": lambda dt: dt.hour
     }
 
     def __init__(self, seasonality_type):
@@ -34,8 +36,8 @@ class Seasonality:
     def datetime_to_array(self, arr):
         return np.vectorize(self._datetime_to_int_func)(arr)
 
-    def _get_next_x(self, last_date, n_next):
-        new_dates = last_date + np.vectorize(lambda t: dt.timedelta(days=int(t)))(np.arange(1, n_next + 1))
+    def _get_next_x(self, last_date, increment, n_next):
+        new_dates = last_date + increment * np.arange(1, n_next + 1)
         return self.datetime_to_array(new_dates)
 
     def apply_decoder(self, apply_to):
@@ -49,8 +51,12 @@ class Seasonality:
 
     def plot_seasonality(self):
         import matplotlib.pyplot as plt
+        weights = self.get_weights()
+        if len(weights.shape) > 1 and weights.shape[1] == self.seasonal_period:
+            weights = weights.T
+
         plt.figure()
-        plt.plot(self.get_weights().T)
+        plt.plot(weights)
         plt.title(self.seasonality_type, fontsize=15)
 
 
@@ -74,8 +80,9 @@ class SharedSeasonality(Seasonality):
     def _create_embedding(self):
         self._embedding = Embedding(
                 self.seasonal_period, output_dim=1,
-                name="seas_emb_%s" % self.seasonality_type, embeddings_initializer=constant(0),
-                embeddings_regularizer=l1_l2(l2=self.l2_reg)
+                name="seas_emb_%s" % self.seasonality_type,
+                embeddings_initializer=constant(0),
+                embeddings_regularizer=l1_l2(l2=self.l2_reg) if self.l2_reg else None
         )
 
     def _create_inputs(self):
@@ -93,14 +100,14 @@ class SharedSeasonality(Seasonality):
     def get_fit_inputs(self, ids, x):
         return [x[:, :-1], x]
 
-    def get_predict_inputs(self, ids, x, last_date):
+    def get_predict_inputs(self, ids, x, last_date, increment):
         # Expand x by one for predicting one step ahead
-        x_expanded = np.hstack([x, self._get_next_x(last_date, 1)])
+        x_expanded = np.hstack([x, self._get_next_x(last_date, increment, 1)])
 
         return [x, x_expanded]
 
-    def get_oos_predictions(self, first_oos_prediction, last_date, n_oos_steps):
-        x_oos = self._get_next_x(last_date, n_oos_steps)
+    def get_oos_predictions(self, first_oos_prediction, last_date, increment, n_oos_steps):
+        x_oos = self._get_next_x(last_date, increment, n_oos_steps)
 
         deseason = self._embedding.get_weights()[0][x_oos[:, 0]] + 1
         oos_season = self._embedding.get_weights()[0][x_oos[:, 1:]][:, :, 0] + 1
@@ -134,7 +141,8 @@ class FactorizedSeasonality(Seasonality):
         self._embedding = Embedding(
                 self.n_time_series, output_dim=self.n_dim,
                 name="seas_emb_%s" % self.seasonality_type,
-                embeddings_initializer=constant(0), embeddings_regularizer=l1_l2(l2=self.l2_reg)
+                embeddings_initializer=constant(0),
+                embeddings_regularizer=l1_l2(l2=self.l2_reg) if self.l2_reg else None
         )
 
         self._seasonality_weights = Dense(self.seasonal_period, activation='linear')
@@ -163,14 +171,14 @@ class FactorizedSeasonality(Seasonality):
     def get_fit_inputs(self, ids, x):
         return [ids, x[:, :-1], x]
 
-    def get_predict_inputs(self, ids, x, last_date):
+    def get_predict_inputs(self, ids, x, last_date, increment):
         # Expand x by one for predicting one step ahead
-        x_expanded = np.hstack([x, self._get_next_x(last_date, 1)])
+        x_expanded = np.hstack([x, self._get_next_x(last_date, increment, 1)])
 
         return [ids, x, x_expanded]
 
-    def get_oos_predictions(self, first_oos_prediction, last_date, n_oos_steps):
-        x_oos = self._get_next_x(last_date, n_oos_steps)
+    def get_oos_predictions(self, first_oos_prediction, last_date, increment, n_oos_steps):
+        x_oos = self._get_next_x(last_date, increment, n_oos_steps)
 
         id_seas_values = self.get_weights()
 

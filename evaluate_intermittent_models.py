@@ -75,7 +75,7 @@ if __name__ == "__main__":
         (crostons_tf.TSB(seasonality=[FactorizedSeasonality(y.shape[0], n_dim=1, seasonality_type=seas1, l2_reg=1e-2),
                                       FactorizedSeasonality(y.shape[0], n_dim=1, seasonality_type=seas2, l2_reg=1e-2)],
                          loss="mse"),
-         {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}, f"TSB - Factorized {seas1} + {seas1}"),
+         {"epochs": 100, "lr": 1e-2, "x": x_dates[:, :-n_holdout]}, f"TSB - Factorized {seas1} + {seas2}"),
     ]
     fig, axes = plt.subplots(len(models) // 2 + (len(models) % 2 == 1), 2, sharex=True)
     for ax, (model, fit_opts, title) in zip(axes.ravel(), models):
@@ -83,13 +83,12 @@ if __name__ == "__main__":
             warnings.simplefilter("ignore", UserWarning)
             model.fit(y[:, :-n_holdout], **fit_opts, verbose=0)
 
-        ax.vlines(np.arange(y.shape[1])[-n_holdout], y.min(), y.max(), linestyles="dashed")
+        ax.vlines(x_dates[0, -n_holdout], y.min(), y.max(), linestyles="dashed")
         for i in range(y.shape[0]):
-            ax.plot(y[i, :], "o--", label="actual values")
-            plot_and_calc_rmse(ax, np.arange(y.shape[1]), y[i, :], model.predict(n_holdout)[i, :], n_holdout,
+            ax.plot(x_dates[i, :], y[i, :], "o--", label="actual values")
+            plot_and_calc_rmse(ax, x_dates[i, :], y[i, :], model.predict(n_holdout)[i, :], n_holdout,
                                label="%s" % title)
             ax.set_title(title)
-            ax.set_xticklabels(x_week[0, :])
         ax.legend(fontsize=8)
 
         print("%s - RMSE: %.2f" % (title, np.sqrt(

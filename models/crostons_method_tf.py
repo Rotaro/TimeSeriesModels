@@ -33,6 +33,7 @@ class IntermittentDemandModel(TFTimeSeriesModel):
 
     def _handle_x(self, x):
         if self.seasonality is not None:
+            self.x_increment = x[0, 1] - x[0, 0]
             assert x is not None, "Need x input for seasonality!"
             x = [seasonality.datetime_to_array(x) for seasonality in self.seasonality]
         self.x = x
@@ -68,14 +69,18 @@ class IntermittentDemandModel(TFTimeSeriesModel):
             + ([
                 input
                 for i, seasonality in enumerate(self.seasonality)
-                for input in seasonality.get_predict_inputs(self._get_dummy_ids(), self.x[i], self.x_dates[:, -1:])
+                for input in seasonality.get_predict_inputs(
+                    self._get_dummy_ids(), self.x[i], self.x_dates[:, -1:], self.x_increment
+                )
             ] if self.seasonality else [])
         )
 
         if self.seasonality:
             oos = np.ones((self.y.shape[0], n_oos_steps - 1)) * preds[:, -1:, 0]
             for i, seasonality in enumerate(self.seasonality):
-                oos *= seasonality.get_oos_predictions(np.ones_like(preds[:, -1:, 0]), self.x_dates[:, -1:], n_oos_steps)
+                oos *= seasonality.get_oos_predictions(
+                    np.ones_like(preds[:, -1:, 0]), self.x_dates[:, -1:], self.x_increment, n_oos_steps
+                )
         else:
             oos = np.repeat(preds[:, -1:, 0], n_oos_steps - 1, axis=1)
 
